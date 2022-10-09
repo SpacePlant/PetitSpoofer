@@ -20,12 +20,12 @@
 * MS-EFSR IDL
 * 
 * Compiled with (32-bit):
-*	midl /win32 /target NT100 ms-dtyp.idl
-*	midl /win32 /target NT100 ms-efsr.idl
+*	midl /win32 ms-dtyp.idl
+*	midl /win32 ms-efsr.idl
 * 
 * Compiled with (64-bit):
-*	midl /amd64 /target NT100 ms-dtyp.idl
-*	midl /amd64 /target NT100 ms-efsr.idl
+*	midl /amd64 ms-dtyp.idl
+*	midl /amd64 ms-efsr.idl
 * 
 * The necessary types from "ms-dtyp.h" were moved to "ms-efsr.h".
 * Structs in "ms-efsr.h" were renamed to avoid redefinition errors.

@@ -18,10 +18,10 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ms-efsr_64.c">
+    <ClCompile Include="ms-efsr_32.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ms-efsr_32.c">
+    <ClCompile Include="ms-efsr_64.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
