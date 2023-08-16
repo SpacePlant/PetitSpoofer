@@ -324,6 +324,7 @@ int wmain(int argc, wchar_t* argv[])
 	if (!binding)
 	{
 		output(L"[-] Failed to create binding :(");
+		return 0;
 	}
 	output(L"[+] Binding created.");
 
